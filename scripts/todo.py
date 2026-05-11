@@ -48,32 +48,36 @@ def add_task(task):
     return "Task added successfully"
 
 
-def get_tasks(show_done=True):
-    if show_done:
-        cursor.execute("SELECT id, task, done FROM todos ORDER BY id DESC")
-    else:
-        cursor.execute("SELECT id, task, done FROM todos WHERE done = 0 ORDER BY id DESC")
+def get_tasks(show_done=False):
+    """List tasks ordered by id ascending so numbers read naturally (1, 2, 3…).
 
+    Numbers are the permanent database ids used by delete and mark done.
+    """
+    cursor.execute("SELECT id, task, done FROM todos ORDER BY id ASC")
     tasks = cursor.fetchall()
 
     if not tasks:
-        return "No tasks found"
+        return "No tasks in your list."
 
     pending = []
     completed = []
 
     for task_id, task_text, done in tasks:
-        line = f"{task_id}. {task_text}"
+        # Colon reads better in TTS than "6." (which sounds like end of sentence).
+        line = f"{task_id}: {task_text}"
         if int(done) == 1:
             completed.append(line)
         else:
             pending.append(line)
 
+    if not pending and not (show_done and completed):
+        return "No open tasks. Everything on your list is done."
+
     result = ""
     if pending:
-        result += "Pending tasks:\n" + "\n".join(pending) + "\n"
-    if completed and show_done:
-        result += "Completed tasks:\n" + "\n".join(completed) + "\n"
+        result += "Open tasks (number is for delete or mark done):\n" + "\n".join(pending) + "\n"
+    if show_done and completed:
+        result += "Already completed:\n" + "\n".join(completed) + "\n"
     return result.strip()
 
 

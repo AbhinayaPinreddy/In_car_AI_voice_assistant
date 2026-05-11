@@ -50,7 +50,7 @@ def will_it_rain_today(city):
 
     clean_city = _normalize_city(city, fallback="Hyderabad")
 
-    # 5 day / 3 hour forecast
+    
     url = f"https://api.openweathermap.org/data/2.5/forecast?q={clean_city}&appid={api_key}&units=metric"
     response = requests.get(url, timeout=10)
     if response.status_code != 200:

@@ -100,9 +100,8 @@ while True:
     try:
         audio_file = record_audio()
         if not audio_file:
-            response = "I could not hear you. Please speak a little louder."
-            print("Assistant:", response)
-            speak(response)
+            # Quiet room: do not run TTS (avoids feedback and repeated prompts every wait window).
+            print("No speech detected — listening again.")
             continue
 
         query = speech_to_text(audio_file)
@@ -136,7 +135,7 @@ while True:
             response = add_task(value)
 
         elif intent == "show_tasks":
-            response = get_tasks()
+            response = get_tasks(show_done=False)
 
         elif intent == "delete_task":
             response = delete_task(value)
@@ -158,3 +157,4 @@ while True:
 
     if response == "Drive safe. Stopping assistant now.":
         break
+    

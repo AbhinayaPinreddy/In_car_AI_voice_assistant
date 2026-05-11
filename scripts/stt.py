@@ -10,8 +10,11 @@ def speech_to_text(audio_path):
     segments, _ = model.transcribe(
         audio_path,
         vad_filter=True,
-        no_speech_threshold=0.5,
-        language="en"
+        vad_parameters=dict(min_silence_duration_ms=350, threshold=0.55),
+        no_speech_threshold=0.72,
+        compression_ratio_threshold=2.6,
+        language="en",
+        condition_on_previous_text=False,
     )
 
     filtered_chunks = []
@@ -21,7 +24,7 @@ def speech_to_text(audio_path):
         if not chunk:
             continue
         no_speech_prob = getattr(segment, "no_speech_prob", 0.0)
-        if no_speech_prob and no_speech_prob > 0.95:
+        if no_speech_prob and no_speech_prob > 0.82:
             continue
         if any(ch.isalpha() for ch in chunk):
             filtered_chunks.append(chunk)

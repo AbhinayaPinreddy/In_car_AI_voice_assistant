@@ -1,6 +1,8 @@
 faster-whisper
 requests
 pyttsx3
+edge-tts
+pygame
 sounddevice
 python-dotenv
 ctranslate2
