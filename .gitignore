@@ -1,0 +1,6 @@
+.env
+venv/
+audio.wav
+database
+__pycache__/
+database/*.db

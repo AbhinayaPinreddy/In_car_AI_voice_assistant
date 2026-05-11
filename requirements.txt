@@ -1,0 +1,8 @@
+faster-whisper
+requests
+pyttsx3
+sounddevice
+python-dotenv
+ctranslate2
+numpy
+scipy
