@@ -1,115 +1,196 @@
-import sounddevice as sd
-import numpy as np
-from scipy.io.wavfile import write
-from collections import deque
+"""Microphone recording with adaptive VAD (voice activity detection)."""
+
+from __future__ import annotations
+
 import time
-from typing import Tuple
+from collections import deque
+from pathlib import Path
+from typing import Optional
 
-_LAST_NOISE_RMS = 0.0025
+import numpy as np
+import sounddevice as sd
+from scipy.io.wavfile import write as wav_write
 
-# Chunks above threshold required to start speech (rejects single-sample / fan / USB spikes).
-_VOICE_START_STREAK = 4
-# After speech starts, use a lower bar so words are not clipped (hysteresis).
-_SPEECH_CONTINUE_RATIO = 0.72
+from config import (
+    AUDIO_TMP,
+    CALIBRATION_SECONDS,
+    CHUNK_SIZE,
+    MAX_RECORD_SECONDS,
+    MAX_WAIT_SECONDS,
+    MIN_SPEECH_SECONDS,
+    SAMPLE_RATE,
+    SILENCE_HANGOVER,
+)
+
+# Shared noise floor so barge-in detection uses the same baseline
+_LAST_NOISE_RMS: float = 0.0025
+_INPUT_DEVICE: Optional[int] = None   # set once on first call to record_audio()
+
+_VOICE_START_STREAK = 3        # consecutive loud chunks needed to confirm speech
+_PRE_ROLL_CHUNKS = 4           # keep a few chunks before speech starts
+
+# Absolute floor — prevents threshold from climbing above this even in noisy rooms
+_ABS_START_MAX = 0.065
+_ABS_CONT_MAX = 0.055
 
 
-def _voice_thresholds(noise_rms: float) -> Tuple[float, float]:
-    """Return (start_threshold, continue_threshold) from calibrated noise floor."""
-    n = max(float(noise_rms), 0.0014)
-    # Strong margin over noise + absolute floor so "digital silence" still needs real speech.
-    start = max(n * 3.4, n + 0.0052, 0.0062)
-    start = min(start, 0.038)
-    cont = max(start * _SPEECH_CONTINUE_RATIO, n * 2.1, 0.0045)
+def _voice_thresholds(noise_rms: float) -> tuple[float, float]:
+    """
+    Compute (start, continue) thresholds from calibrated noise floor.
+
+    Strategy:
+    - start  = noise * 1.8  (voice must be ~80% louder than background)
+    - cont   = noise * 1.3  (hysteresis: easier to stay in than to enter)
+    - Both are capped so extremely noisy rooms don't block speech entirely.
+    - cont is always strictly less than start.
+    """
+    n = max(float(noise_rms), 0.003)
+    start = min(n * 1.8, _ABS_START_MAX)
+    start = max(start, 0.008)          # absolute floor for digital silence
+    cont = min(n * 1.3, _ABS_CONT_MAX)
+    cont = max(cont, 0.005)
+    cont = min(cont, start * 0.85)     # cont must always be < start
     return start, cont
 
 
-def record_audio():
-    global _LAST_NOISE_RMS
+def _select_input_device() -> Optional[int]:
+    """
+    Pick the input device with the lowest noise floor.
 
-    fs = 16000
-    chunk_size = 1024
-    max_wait_seconds = 6.0
-    max_record_seconds = 12.0
-    silence_hangover_seconds = 0.9
-    min_speech_seconds = 0.35
-    pre_roll_chunks = 4
+    Tries all available input devices, records 0.3 s each, and returns the
+    device index whose RMS is smallest. Falls back to system default (None)
+    if nothing can be opened.
+    """
+    devices = sd.query_devices()
+    best_idx: Optional[int] = None
+    best_rms: float = float("inf")
 
-    print("Speak now...")
-    calibration = sd.rec(int(0.75 * fs), samplerate=fs, channels=1, dtype="float32")
+    for i, d in enumerate(devices):
+        if d["max_input_channels"] < 1:
+            continue
+        try:
+            cal = sd.rec(
+                int(0.3 * SAMPLE_RATE),
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                device=i,
+            )
+            sd.wait()
+            rms = float(np.sqrt(np.mean(cal ** 2)))
+            if rms < best_rms:
+                best_rms = rms
+                best_idx = i
+        except Exception:
+            continue
+
+    if best_idx is not None:
+        print(f"Selected input device [{best_idx}]: {devices[best_idx]['name']}  noise={best_rms:.5f}")
+    return best_idx
+
+
+def record_audio() -> Optional[str]:
+    """
+    Record one utterance from the microphone.
+
+    Returns the path to the saved WAV file, or None if no speech was detected
+    within MAX_WAIT_SECONDS (so the caller can skip STT / TTS entirely).
+    """
+    global _LAST_NOISE_RMS, _INPUT_DEVICE
+
+    if _INPUT_DEVICE is None:
+        _INPUT_DEVICE = _select_input_device()
+    device = _INPUT_DEVICE
+
+    print("Listening...")
+    # Calibrate noise floor
+    calibration = sd.rec(
+        int(CALIBRATION_SECONDS * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        device=device,
+    )
     sd.wait()
-    noise_rms = float(np.sqrt(np.mean(np.square(calibration))))
+    noise_rms = float(np.sqrt(np.mean(calibration ** 2)))
     _LAST_NOISE_RMS = max(noise_rms, 0.0014)
-    thr_start, thr_continue = _voice_thresholds(_LAST_NOISE_RMS)
+    thr_start, thr_cont = _voice_thresholds(_LAST_NOISE_RMS)
 
-    pre_buffer = deque(maxlen=pre_roll_chunks)
-    frames = []
+    pre_buffer: deque[np.ndarray] = deque(maxlen=_PRE_ROLL_CHUNKS)
+    frames: list[np.ndarray] = []
     speech_started = False
-    speech_started_at = None
-    last_voice_at = None
+    speech_started_at: float = 0.0
+    last_voice_at: float = 0.0
     above_streak = 0
 
-    with sd.InputStream(samplerate=fs, channels=1, dtype="float32", blocksize=chunk_size) as stream:
+    stream_kw = dict(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        blocksize=CHUNK_SIZE,
+        device=device,
+    )
+
+    with sd.InputStream(**stream_kw) as stream:
         started_at = time.monotonic()
         while True:
             now = time.monotonic()
-            data, _ = stream.read(chunk_size)
+            data, _ = stream.read(CHUNK_SIZE)
             chunk = data.copy()
-            rms = float(np.sqrt(np.mean(np.square(chunk))))
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+
             if speech_started:
-                voice_detected = rms >= thr_continue
+                voice_now = rms >= thr_cont
             else:
-                if rms >= thr_start:
-                    above_streak += 1
-                else:
-                    above_streak = 0
-                voice_detected = above_streak >= _VOICE_START_STREAK
+                above_streak = above_streak + 1 if rms >= thr_start else 0
+                voice_now = above_streak >= _VOICE_START_STREAK
 
             if not speech_started:
                 pre_buffer.append(chunk)
-                if voice_detected:
+                if voice_now:
                     speech_started = True
                     speech_started_at = now
                     last_voice_at = now
                     frames.extend(list(pre_buffer))
                     frames.append(chunk)
+                elif now - started_at >= MAX_WAIT_SECONDS:
+                    print("No speech detected — listening again.")
+                    return None
             else:
                 frames.append(chunk)
-                if voice_detected:
+                if voice_now:
                     last_voice_at = now
 
-                enough_speech = (now - speech_started_at) >= min_speech_seconds
-                silence_timeout = (now - last_voice_at) >= silence_hangover_seconds
-                max_record_reached = (now - speech_started_at) >= max_record_seconds
-                if (enough_speech and silence_timeout) or max_record_reached:
+                elapsed = now - speech_started_at
+                silence = now - last_voice_at
+                if (elapsed >= MIN_SPEECH_SECONDS and silence >= SILENCE_HANGOVER) or elapsed >= MAX_RECORD_SECONDS:
                     break
 
-            if not speech_started and (now - started_at) >= max_wait_seconds:
-                # Do not capture seconds of silence: Whisper will hallucinate text.
-                print("No speech detected (quiet input).")
-                return None
-
     recording = np.concatenate(frames, axis=0)
-    rms = float(np.sqrt(np.mean(np.square(recording))))
     peak = float(np.max(np.abs(recording)))
     if 0.0 < peak < 0.18:
-        recording = recording * (0.18 / peak)
-        recording = np.clip(recording, -1.0, 1.0)
+        recording = np.clip(recording * (0.18 / peak), -1.0, 1.0)
 
     audio_int16 = np.int16(recording * 32767)
-    write("audio.wav", fs, audio_int16)
+    wav_write(str(AUDIO_TMP), SAMPLE_RATE, audio_int16)
 
-    print(f"Recording completed (level rms={rms:.5f}, peak={peak:.5f})")
+    rms = float(np.sqrt(np.mean(recording ** 2)))
+    print(f"Captured audio  rms={rms:.5f}  peak={peak:.5f}")
+    return str(AUDIO_TMP)
 
-    return "audio.wav"
 
-
-def detect_voice_interrupt():
-    fs = 16000
-    sample = sd.rec(int(0.2 * fs), samplerate=fs, channels=1, dtype="float32")
+def detect_voice_interrupt() -> bool:
+    """Return True if a loud sound (barge-in) is detected on the mic right now."""
+    sample = sd.rec(
+        int(0.2 * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        device=_INPUT_DEVICE,
+    )
     sd.wait()
-    rms = float(np.sqrt(np.mean(np.square(sample))))
-    n = max(_LAST_NOISE_RMS, 0.0014)
-    # Slightly easier than record start so barge-in still works, but above idle noise.
-    threshold = max(n * 2.9, n + 0.0048, 0.0075)
-    threshold = min(threshold, 0.042)
+    rms = float(np.sqrt(np.mean(sample ** 2)))
+    n = max(_LAST_NOISE_RMS, 0.003)
+    threshold = min(n * 1.8, _ABS_START_MAX)
+    threshold = max(threshold, 0.008)
     return rms >= threshold

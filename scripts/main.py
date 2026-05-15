@@ -1,160 +1,186 @@
-from record_audio import record_audio
-from record_audio import detect_voice_interrupt
+"""In-car AI voice assistant — main event loop."""
 
+from __future__ import annotations
+
+import re
+import traceback
+
+from config import DEFAULT_CITY
+from llm_engine import ask_llm, clear_history
+from news import get_news
+from record_audio import detect_voice_interrupt, record_audio
 from stt import speech_to_text
-
-from llm_engine import ask_llm
-
+from todo import add_task, delete_task, get_tasks, mark_task_done
 from tts import speak
-
 from weather import get_weather, will_it_rain_today
 
-from news import get_news
+# ── Intent detection ──────────────────────────────────────────────────────────
 
-from todo import add_task, get_tasks, delete_task, mark_task_done
+_EXIT_PHRASES = {"stop assistant", "exit", "quit", "goodbye", "bye", "shut down", "stop"}
 
-DEFAULT_CITY = "Hyderabad"
+_SHOW_TASKS_PHRASES = {
+    "show task", "show tasks", "my todo", "my todos",
+    "todo list", "show my todo list", "list tasks", "list my tasks",
+}
+
+_WEATHER_TYPOS = {
+    "whether": "weather",
+    "matter": "weather",
+    "wether": "weather",
+}
+
+_STT_RAIN_ALTS = ("rain", "train")  # "train" is a common STT mishearing of "rain"
 
 
-def is_meaningful_query(query):
-    letters = sum(ch.isalpha() for ch in query)
-    return letters >= 3
+def _normalise(query: str) -> str:
+    q = query.lower().strip()
+    for typo, fix in _WEATHER_TYPOS.items():
+        q = q.replace(typo + " in", fix + " in")
+    q = q.replace("to-do", "todo").replace("to do", "todo")
+    return q
 
 
-def detect_intent(query):
-    import re
+def _is_meaningful(query: str) -> bool:
+    return sum(ch.isalpha() for ch in query) >= 3
 
-    normalized = query
-    normalized = normalized.replace("whether in", "weather in").replace("matter in", "weather in")
-    normalized = normalized.replace("to-do", "todo").replace("to do", "todo")
-    normalized = normalized.strip()
 
-    if any(x in normalized for x in ["stop assistant", "exit", "quit", "goodbye"]):
+def detect_intent(query: str) -> tuple[str, str | None]:
+    q = _normalise(query)
+
+    # Exit
+    if any(phrase in q for phrase in _EXIT_PHRASES) or q in _EXIT_PHRASES:
         return "exit", None
 
-    # Temperature questions should be treated as weather.
-    m_temp = re.search(r"\b(temp|temperature)\b\s+in\s+([a-zA-Z\s-]+)", normalized)
-    if m_temp:
-        return "weather", m_temp.group(2).strip()
-    if "weather in" in normalized:
-        city = normalized.split("weather in", 1)[1].strip()
-        return "weather", city if city else DEFAULT_CITY
-    if "weather" in normalized:
+    # Temperature / weather
+    m = re.search(r"\b(temp(?:erature)?)\b\s+in\s+([a-zA-Z\s-]+)", q)
+    if m:
+        return "weather", m.group(2).strip()
+
+    if "weather in" in q:
+        city = q.split("weather in", 1)[1].strip()
+        return "weather", city or DEFAULT_CITY
+    if "weather" in q:
         return "weather", DEFAULT_CITY
 
-    # "rain" is often transcribed as "train" by STT.
-    is_rain_query = ("rain" in normalized) or (
-        "train" in normalized and " in " in normalized and any(x in normalized for x in ["today", "tomorrow"])
-    )
-    if is_rain_query:
-        # e.g. "will it rain in kolkata today"
-        m = re.search(r"(rain|train)\s+in\s+([a-zA-Z\s-]+)", normalized)
-        city = m.group(1).strip() if m else DEFAULT_CITY
-        city = m.group(2).strip() if m else DEFAULT_CITY
-        return "rain_today", city
-    if "news" in normalized or "headlines" in normalized:
+    # Rain
+    has_rain_word = any(w in q for w in _STT_RAIN_ALTS)
+    if has_rain_word:
+        # Accept "train in X today/tomorrow" as rain query
+        if "train" in q and not any(t in q for t in ("today", "tomorrow", " in ")):
+            pass  # not a rain query — real train question
+        else:
+            m = re.search(r"(?:rain|train)\s+in\s+([a-zA-Z\s-]+)", q)
+            city = m.group(1).strip() if m else DEFAULT_CITY
+            return "rain_today", city
+
+    # News
+    if "news" in q or "headlines" in q:
         return "news", None
 
-    # --- TODO / TASK intents (flexible voice phrasing) ---
-    if re.search(r"\b(show|list|read)\b.*\b(todo|todos|task|tasks)\b", normalized) or normalized in {
-        "show task",
-        "show tasks",
-        "my todo",
-        "my todos",
-        "todo list",
-        "show my todo list",
-    }:
+    # Tasks — show
+    if re.search(r"\b(show|list|read)\b.*\b(todo|todos|task|tasks)\b", q) or q in _SHOW_TASKS_PHRASES:
         return "show_tasks", None
 
-    add_match = re.search(r"\b(add|create|remember|remind)\b\s+(.*)", normalized)
-    if add_match and ("task" in normalized or "tasks" in normalized or "todo" in normalized):
-        task_text = add_match.group(2).strip()
-        # remove common filler tails
-        task_text = re.sub(r"\b(to|into)\b\s+(my\s+)?\b(todo|tasks?)\b\s*(list)?\.?$", "", task_text).strip()
-        if task_text:
-            return "add_task", task_text
+    # Tasks — add (explicit: "add/create/remember X task/todo")
+    m = re.search(r"\b(add|create|remember|remind)\b\s+(.*)", q)
+    if m and re.search(r"\b(task|tasks|todo|todos)\b", q):
+        task = m.group(2)
+        task = re.sub(r"\b(?:to|into)\b\s+(?:my\s+)?\b(?:todo|tasks?)\b\s*(?:list)?\.?$", "", task).strip()
+        if task:
+            return "add_task", task
 
-    # Natural phrasing like: "add buy groceries" (without saying task/todo)
-    add_simple = re.search(r"^add\s+(.+)$", normalized)
-    if add_simple:
-        task_text = add_simple.group(1).strip()
-        task_text = re.sub(r"\b(to|into)\b\s+(my\s+)?\b(todo|tasks?)\b\s*(list)?\.?$", "", task_text).strip()
-        if task_text:
-            return "add_task", task_text
+    # Tasks — add (implicit: "add X" without task keyword)
+    m = re.match(r"^add\s+(.+)$", q)
+    if m:
+        task = re.sub(r"\b(?:to|into)\b\s+(?:my\s+)?\b(?:todo|tasks?)\b\s*(?:list)?\.?$", "", m.group(1)).strip()
+        if task:
+            return "add_task", task
 
-    del_match = re.search(r"\b(delete|remove)\b\s+(task\s*)?(\d+)\b", normalized)
-    if del_match:
-        return "delete_task", del_match.group(3)
+    # Tasks — delete / mark done
+    m = re.search(r"\b(?:delete|remove)\b\s+(?:task\s*)?(\d+)\b", q)
+    if m:
+        return "delete_task", m.group(1)
 
-    done_match = re.search(r"\b(mark|complete|done)\b\s+(task\s*)?(\d+)\b", normalized)
-    if done_match:
-        return "mark_done", done_match.group(3)
+    m = re.search(r"\b(?:mark|complete|done)\b\s+(?:task\s*)?(\d+)\b", q)
+    if m:
+        return "mark_done", m.group(1)
+
+    # Clear conversation memory
+    if re.search(r"\b(clear|reset)\b.*\b(history|memory|context|conversation)\b", q):
+        return "clear_history", None
 
     return "llm", None
 
 
-print("Assistant Started...")
+# ── Response dispatcher ───────────────────────────────────────────────────────
+
+def _dispatch(intent: str, value: str | None) -> str:
+    if intent == "weather":
+        return get_weather(value)
+    if intent == "rain_today":
+        return will_it_rain_today(value)
+    if intent == "news":
+        return get_news()
+    if intent == "add_task":
+        return add_task(value or "")
+    if intent == "show_tasks":
+        return get_tasks(show_done=False)
+    if intent == "delete_task":
+        return delete_task(value or "")
+    if intent == "mark_done":
+        return mark_task_done(value or "")
+    if intent == "clear_history":
+        clear_history()
+        return "Conversation memory cleared."
+    # intent == "llm"
+    return ask_llm(value or "")
 
 
-while True:
-    try:
-        audio_file = record_audio()
-        if not audio_file:
-            # Quiet room: do not run TTS (avoids feedback and repeated prompts every wait window).
-            print("No speech detected — listening again.")
-            continue
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
-        query = speech_to_text(audio_file)
-        query = query.strip().lower()
+def main() -> None:
+    print("=" * 50)
+    print("  In-Car AI Voice Assistant — ready")
+    print("  Say 'goodbye' or 'exit' to stop.")
+    print("=" * 50)
 
-        if not query or not is_meaningful_query(query):
-            response = "I did not catch that clearly. Please speak again."
-            print("Assistant:", response)
-            speak(response)
-            continue
+    while True:
+        try:
+            audio_path = record_audio()
+            if not audio_path:
+                continue  # silence — no speech, no TTS feedback
 
-        print("You:", query)
-        intent, value = detect_intent(query)
+            query = speech_to_text(audio_path).strip().lower()
 
-        if intent == "exit":
-            response = "Drive safe. Stopping assistant now."
-            print("Assistant:", response)
-            speak(response)
+            if not query or not _is_meaningful(query):
+                response = "I did not catch that. Please try again."
+                print(f"Assistant: {response}")
+                speak(response)
+                continue
+
+            print(f"\nYou: {query}")
+            intent, value = detect_intent(query)
+
+            if intent == "exit":
+                response = "Drive safe. Goodbye!"
+                print(f"Assistant: {response}")
+                speak(response)
+                break
+
+            response = _dispatch(intent, value)
+
+        except KeyboardInterrupt:
+            print("\nStopped by user.")
             break
+        except Exception:
+            traceback.print_exc()
+            response = "Something went wrong. Please try again."
 
-        if intent == "weather":
-            response = get_weather(value)
+        print(f"Assistant: {response}")
+        interrupted = speak(response, should_interrupt=detect_voice_interrupt)
+        if interrupted:
+            print("(Interrupted — listening…)")
 
-        elif intent == "rain_today":
-            response = will_it_rain_today(value)
 
-        elif intent == "news":
-            response = get_news()
-
-        elif intent == "add_task":
-            response = add_task(value)
-
-        elif intent == "show_tasks":
-            response = get_tasks(show_done=False)
-
-        elif intent == "delete_task":
-            response = delete_task(value)
-
-        elif intent == "mark_done":
-            response = mark_task_done(value)
-
-        else:
-            response = ask_llm(query)
-
-    except Exception:
-        response = "Something went wrong. Please try again."
-
-    print("Assistant:", response)
-    interrupted = speak(response, should_interrupt=detect_voice_interrupt)
-    if interrupted:
-        print("Assistant interrupted. Listening now...")
-        continue
-
-    if response == "Drive safe. Stopping assistant now.":
-        break
-    
+if __name__ == "__main__":
+    main()

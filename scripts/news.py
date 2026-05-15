@@ -1,35 +1,49 @@
+"""Top headlines via NewsAPI."""
+
+from __future__ import annotations
+
+import re
+
 import requests
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import NEWS_API_KEY
 
-def get_news():
-    api_key = os.getenv("NEWS_API_KEY")
-    
-    if not api_key:
-        return "News API key is missing. Add NEWS_API_KEY to .env."
+_BASE = "https://newsapi.org/v2/top-headlines"
+_MAX_HEADLINES = 3
 
-    url = f"https://newsapi.org/v2/top-headlines?country=us&apiKey={api_key}"
 
-    response = requests.get(url, timeout=10)
-    if response.status_code != 200:
-        return "I could not fetch news right now."
+def _strip_source(title: str) -> str:
+    """Remove ' - Source Name' suffix that NewsAPI appends to titles."""
+    return re.sub(r"\s*-\s*[^-]{2,40}$", "", title).strip()
 
-    data = response.json()
 
-    articles = data.get("articles", [])[:5]
-    if not articles:
-        return "No news articles are available right now."
+def get_news() -> str:
+    if not NEWS_API_KEY:
+        return "News is unavailable. Please add your NewsAPI key to the dot-env file."
 
-    titles = []
-    for article in articles:
-        title = article.get("title")
-        if title:
-            titles.append(title)
+    try:
+        resp = requests.get(
+            _BASE,
+            params={"country": "us", "apiKey": NEWS_API_KEY, "pageSize": 10},
+            timeout=10,
+        )
+    except requests.RequestException:
+        return "I could not connect to the news service right now."
+
+    if resp.status_code == 401:
+        return "The news API key appears to be invalid."
+    if resp.status_code != 200:
+        return "I could not fetch the news right now."
+
+    articles = resp.json().get("articles", [])
+    titles = [
+        _strip_source(a["title"])
+        for a in articles
+        if a.get("title") and a["title"] != "[Removed]"
+    ][:_MAX_HEADLINES]
 
     if not titles:
-        return "I could not read news headlines right now."
+        return "There are no news headlines available right now."
 
-    short_titles = titles[:3]
-    return "Here are the top headlines. " + ". ".join(short_titles) + "."
+    joined = ". ".join(titles)
+    return f"Here are today's top headlines. {joined}."
