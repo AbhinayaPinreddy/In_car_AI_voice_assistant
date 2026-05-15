@@ -4,3 +4,6 @@ audio.wav
 database
 __pycache__/
 database/*.db
+.venv/
+.venv
+/.venv/
