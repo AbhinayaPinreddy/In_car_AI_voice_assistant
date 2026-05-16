@@ -11,10 +11,15 @@ Falls back to HuggingFace (non-streaming) then local canned replies.
 
 from __future__ import annotations
 
+import platform
 from collections import deque
 from typing import Generator, Optional
 
 import requests
+
+if platform.system() == "Windows":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from .config import (
     HF_API_TOKEN,

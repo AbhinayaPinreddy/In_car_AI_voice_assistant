@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import queue
 import re
 import tempfile
@@ -21,6 +22,10 @@ import time
 
 import edge_tts
 import pygame
+
+# edge-tts uses aiohttp which breaks on Windows with the default ProactorEventLoop
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from .config import TTS_VOICES
 
