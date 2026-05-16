@@ -1,9 +1,32 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
 .env
-venv/
-audio.wav
-database
-__pycache__/
-database/*.db
+*.env
+!.env_example
+
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
-.venv
-/.venv/
+venv/
+env/
+ENV/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ── Audio temp files & runtime cache ─────────────────────────────────────────
+*.wav
+*.mp3
+scripts/.device_cache.json
+
+# ── Database (runtime data, not code) ────────────────────────────────────────
+scripts/database/
+database/
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

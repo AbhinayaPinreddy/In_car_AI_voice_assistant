@@ -6,7 +6,7 @@ import re
 
 import requests
 
-from config import NEWS_API_KEY
+from .config import NEWS_API_KEY
 
 _BASE = "https://newsapi.org/v2/top-headlines"
 _MAX_HEADLINES = 3

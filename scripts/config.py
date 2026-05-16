@@ -43,8 +43,8 @@ TTS_VOICES: list[str] = [
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_MAX_HISTORY: int = 6        # number of user+assistant turn pairs to keep
-LLM_MAX_TOKENS: int = 140
-LLM_TEMPERATURE: float = 0.3
+LLM_MAX_TOKENS: int = 180       # enough for 3 full natural sentences
+LLM_TEMPERATURE: float = 0.25   # lower = more consistent, natural tone
 LLM_TIMEOUT: int = 20
 
 # ── Paths ─────────────────────────────────────────────────────────────────────

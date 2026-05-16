@@ -8,7 +8,7 @@ from typing import Optional
 
 import requests
 
-from config import DEFAULT_CITY, OPENWEATHER_API_KEY
+from .config import DEFAULT_CITY, OPENWEATHER_API_KEY
 
 _BASE = "https://api.openweathermap.org/data/2.5"
 _STOPWORDS = {"today", "tomorrow", "please", "now", "tonight", "too", "the"}

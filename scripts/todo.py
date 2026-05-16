@@ -6,7 +6,7 @@ import contextlib
 import sqlite3
 from typing import Optional
 
-from config import DB_PATH
+from .config import DB_PATH
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 

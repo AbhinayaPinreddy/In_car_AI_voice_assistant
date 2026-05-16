@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import deque
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import sounddevice as sd
 from scipy.io.wavfile import write as wav_write
 
-from config import (
+from .config import (
     AUDIO_TMP,
     CALIBRATION_SECONDS,
     CHUNK_SIZE,
@@ -19,12 +19,15 @@ from config import (
     MAX_WAIT_SECONDS,
     MIN_SPEECH_SECONDS,
     SAMPLE_RATE,
+    SCRIPTS_DIR,
     SILENCE_HANGOVER,
 )
 
+_DEVICE_CACHE_FILE = SCRIPTS_DIR / ".device_cache.json"
+
 # Shared noise floor so barge-in detection uses the same baseline
 _LAST_NOISE_RMS: float = 0.0025
-_INPUT_DEVICE: Optional[int] = None   # set once on first call to record_audio()
+_INPUT_DEVICE: Optional[int] = None   # set once at first record_audio() call
 
 _VOICE_START_STREAK = 3        # consecutive loud chunks needed to confirm speech
 _PRE_ROLL_CHUNKS = 4           # keep a few chunks before speech starts
@@ -55,27 +58,34 @@ def _voice_thresholds(noise_rms: float) -> tuple[float, float]:
 
 def _select_input_device() -> Optional[int]:
     """
-    Pick the input device with the lowest noise floor.
+    Pick the input device with the lowest noise floor, with disk caching.
 
-    Tries all available input devices, records 0.3 s each, and returns the
-    device index whose RMS is smallest. Falls back to system default (None)
-    if nothing can be opened.
+    Result is saved to .device_cache.json so subsequent startups are instant
+    (~1.5 s saved). Cache is invalidated if the device list changes.
     """
     devices = sd.query_devices()
+    device_names = [d["name"] for d in devices]
+
+    # Try loading from cache
+    if _DEVICE_CACHE_FILE.exists():
+        try:
+            cached = json.loads(_DEVICE_CACHE_FILE.read_text())
+            if cached.get("devices") == device_names:
+                idx = cached["best_idx"]
+                print(f"Input device [{idx}] '{devices[idx]['name']}' (cached)")
+                return idx
+        except Exception:
+            pass
+
+    # Probe all input devices
     best_idx: Optional[int] = None
     best_rms: float = float("inf")
-
     for i, d in enumerate(devices):
         if d["max_input_channels"] < 1:
             continue
         try:
-            cal = sd.rec(
-                int(0.3 * SAMPLE_RATE),
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-                device=i,
-            )
+            cal = sd.rec(int(0.3 * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+                         channels=1, dtype="float32", device=i)
             sd.wait()
             rms = float(np.sqrt(np.mean(cal ** 2)))
             if rms < best_rms:
@@ -86,6 +96,11 @@ def _select_input_device() -> Optional[int]:
 
     if best_idx is not None:
         print(f"Selected input device [{best_idx}]: {devices[best_idx]['name']}  noise={best_rms:.5f}")
+        try:
+            _DEVICE_CACHE_FILE.write_text(json.dumps({"best_idx": best_idx, "devices": device_names}))
+        except Exception:
+            pass
+
     return best_idx
 
 
