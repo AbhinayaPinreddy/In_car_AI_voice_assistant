@@ -255,3 +255,9 @@ All tunable settings are in [scripts/config.py](scripts/config.py):
 | `LLM_MAX_TOKENS` | `180` | Max response length |
 | `MAX_WAIT_SECONDS` | `7.0` | How long to wait for speech before giving up |
 | `MAX_RECORD_SECONDS` | `14.0` | Maximum recording length per utterance |
+## Collaboration
+
+This project was created in collaboration with [Superteams.ai](https://superteams.ai).
+
+The collaboration involved contributing technical content, sharing insights, and building projects/blogs focused on learning, innovation, and community engagement in the tech ecosystem.
+
